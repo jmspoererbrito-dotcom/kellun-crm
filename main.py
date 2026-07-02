@@ -70,7 +70,7 @@ def api_leads(stage_id: int = 0, q: str = "", limit: int = 40):
             domain += ["|", "|", ["name", "ilike", q], ["contact_name", "ilike", q],
                        ["partner_name", "ilike", q]]
         leads = odoo("crm.lead", "search_read", [domain], {
-            "fields": ["id", "name", "contact_name", "partner_name", "phone", "mobile",
+            "fields": ["id", "name", "contact_name", "partner_name", "phone",
                        "email_from", "stage_id", "description", "create_date",
                        "write_date", "expected_revenue", "user_id"],
             "limit": limit, "order": "write_date desc"})
@@ -113,7 +113,7 @@ def api_search_notes(q: str, limit: int = 50):
         leads = {}
         if lead_ids:
             recs = odoo("crm.lead", "read", [lead_ids],
-                        {"fields": ["id", "name", "contact_name", "phone", "mobile", "stage_id"]})
+                        {"fields": ["id", "name", "contact_name", "phone", "stage_id"]})
             leads = {r["id"]: r for r in recs}
         results = []
         for m in msgs:
@@ -124,7 +124,7 @@ def api_search_notes(q: str, limit: int = 50):
                 "lead_id": m["res_id"],
                 "lead_name": lead.get("name", ""),
                 "contact": lead.get("contact_name") or "",
-                "phone": lead.get("mobile") or lead.get("phone") or "",
+                "phone": lead.get("phone") or "",
                 "stage": lead["stage_id"][1] if lead.get("stage_id") else "",
                 "date": m.get("date", ""),
                 "note": clean_html(m.get("body", ""))[:300]
@@ -172,7 +172,7 @@ def api_today():
         leads = {}
         if lead_ids:
             recs = odoo("crm.lead", "read", [lead_ids],
-                        {"fields": ["id", "name", "contact_name", "phone", "mobile", "stage_id"]})
+                        {"fields": ["id", "name", "contact_name", "phone", "stage_id"]})
             leads = {r["id"]: r for r in recs}
         results = []
         for a in acts:
@@ -183,7 +183,7 @@ def api_today():
                 "lead_id": a["res_id"],
                 "lead_name": lead.get("name", ""),
                 "contact": lead.get("contact_name") or "",
-                "phone": lead.get("mobile") or lead.get("phone") or "",
+                "phone": lead.get("phone") or "",
                 "stage": lead["stage_id"][1] if lead.get("stage_id") else "",
                 "activity": a.get("summary") or (a["activity_type_id"][1] if a.get("activity_type_id") else "Actividad"),
                 "deadline": a.get("date_deadline", ""),
@@ -389,7 +389,7 @@ async function loadLeads(){
     const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(q));
     if(!j.leads.length){ $('list').innerHTML = '<div class="empty">Sin leads en esta vista.</div>'; return; }
     $('list').innerHTML = j.leads.map(l => {
-      const phone = l.mobile || l.phone || '';
+      const phone = l.phone || '';
       const desc = (l.description||'').replace(/<[^>]+>/g,'').trim();
       return `<div class="card">
         <span class="badge">${l.stage_id ? esc(l.stage_id[1]) : '—'}</span>
@@ -464,7 +464,7 @@ async function openLead(id){
     // fallback: fetch lead individually via /api/leads search won't give one; use read endpoint
     let lead = null;
     try{ const r = await api('/api/lead_read?id='+id); lead = r.lead; }catch(_){}
-    const phone = lead ? (lead.mobile || lead.phone || '') : '';
+    const phone = lead ? (lead.phone || '') : '';
     const desc = lead ? (lead.description||'').replace(/<[^>]+>/g,'').trim() : '';
     const stageOpts = STAGES.map(s =>
       '<option value="'+s.id+'"'+(lead && lead.stage_id && lead.stage_id[0]===s.id?' selected':'')+'>'+esc(s.name)+'</option>').join('');
@@ -529,7 +529,7 @@ def api_lead_read(id: int):
     try:
         recs = odoo("crm.lead", "read", [[id]],
                     {"fields": ["id", "name", "contact_name", "partner_name", "phone",
-                                "mobile", "email_from", "stage_id", "description",
+                                "email_from", "stage_id", "description",
                                 "expected_revenue", "create_date"]})
         return {"ok": True, "lead": recs[0] if recs else None}
     except Exception as e:
