@@ -38,6 +38,20 @@ def odoo(model, method, args, kwargs=None):
     return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {})
 
 
+def current_uid():
+    uid, _ = get_conn()
+    return uid
+
+
+NEG_KEYWORDS = ["desech", "no responde", "no clasific", "recicl"]
+
+
+def negative_stage_ids():
+    """IDs de etapas 'muertas' (descartado, no responde, no clasificado, reciclado)."""
+    stages = odoo("crm.stage", "search_read", [[]], {"fields": ["id", "name"]})
+    return [s["id"] for s in stages if any(k in s["name"].lower() for k in NEG_KEYWORDS)]
+
+
 def clean_html(text):
     if not text:
         return ""
@@ -61,19 +75,22 @@ def api_stages():
 
 
 @app.get("/api/leads")
-def api_leads(stage_id: int = 0, q: str = "", limit: int = 40):
+def api_leads(stage_id: int = 0, q: str = "", limit: int = 40, mine: int = 1, order: str = "recent"):
     try:
         domain = []
         if stage_id:
             domain.append(["stage_id", "=", stage_id])
+        if mine:
+            domain.append(["user_id", "=", current_uid()])
         if q:
             domain += ["|", "|", ["name", "ilike", q], ["contact_name", "ilike", q],
                        ["partner_name", "ilike", q]]
+        order_clause = "create_date asc" if order == "oldest" else "create_date desc"
         leads = odoo("crm.lead", "search_read", [domain], {
             "fields": ["id", "name", "contact_name", "partner_name", "phone",
                        "email_from", "stage_id", "description", "create_date",
                        "write_date", "expected_revenue", "user_id"],
-            "limit": limit, "order": "write_date desc"})
+            "limit": limit, "order": order_clause})
         return {"ok": True, "leads": leads}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -195,10 +212,17 @@ def api_today():
 
 
 @app.get("/api/pipeline")
-def api_pipeline():
+def api_pipeline(mine: int = 1, exclude_neg: int = 1):
     try:
+        domain = []
+        if mine:
+            domain.append(["user_id", "=", current_uid()])
+        if exclude_neg:
+            neg_ids = negative_stage_ids()
+            if neg_ids:
+                domain.append(["stage_id", "not in", neg_ids])
         data = odoo("crm.lead", "read_group",
-                    [[], ["stage_id"], ["stage_id"]])
+                    [domain, ["stage_id"], ["stage_id"]])
         result = [{"stage": d["stage_id"][1] if d.get("stage_id") else "Sin etapa",
                    "stage_id": d["stage_id"][0] if d.get("stage_id") else 0,
                    "count": d["stage_id_count"]} for d in data]
@@ -297,6 +321,9 @@ textarea{width:100%;padding:10px;border:1.5px solid var(--borde);border-radius:9
 let STAGES = [];
 let VIEW = 'hoy';
 let CUR_STAGE = 0;
+let MINE_ONLY = 1;
+let ORDER = 'recent';
+let EXCLUDE_NEG = 1;
 
 const $ = id => document.getElementById(id);
 const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -372,11 +399,17 @@ async function renderHoy(){
 async function renderLeads(){
   const chips = '<div class="chips"><div class="chip'+(CUR_STAGE===0?' on':'')+'" onclick="setStage(0)">Todos</div>' +
     STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+esc(s.name)+'</div>').join('') + '</div>';
+  const filters = `<div class="chips">
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;loadLeads()">👤 Mis leads</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;loadLeads()">🏢 Todos</div>
+    <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';loadLeads()">🕐 Más reciente</div>
+    <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';loadLeads()">📅 Más antiguo</div>
+  </div>`;
   $('wrap').innerHTML = `
     <div class="search">
       <input id="qLeads" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')loadLeads()">
       <button onclick="loadLeads()">Buscar</button>
-    </div>` + chips + '<div id="list"><div class="spin">Cargando…</div></div>';
+    </div>` + chips + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
   loadLeads();
 }
 
@@ -386,16 +419,18 @@ async function loadLeads(){
   const q = $('qLeads') ? $('qLeads').value.trim() : '';
   $('list').innerHTML = '<div class="spin">Cargando…</div>';
   try{
-    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(q));
+    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(q)+'&mine='+MINE_ONLY+'&order='+ORDER);
     if(!j.leads.length){ $('list').innerHTML = '<div class="empty">Sin leads en esta vista.</div>'; return; }
     $('list').innerHTML = j.leads.map(l => {
       const phone = l.phone || '';
       const desc = (l.description||'').replace(/<[^>]+>/g,'').trim();
+      const fecha = (l.create_date||'').split(' ')[0];
       return `<div class="card">
         <span class="badge">${l.stage_id ? esc(l.stage_id[1]) : '—'}</span>
         <div class="nm">${esc(l.name)}</div>
         <div class="ct">${esc(l.contact_name||l.partner_name||'')} ${phone ? '· '+esc(phone) : ''}</div>
         ${desc ? '<div class="note-prev">'+esc(desc.slice(0,200))+'</div>' : ''}
+        <div class="meta">🗓 Ingresó: ${esc(fecha)}</div>
         <div class="row">
           ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞</a><a class="btn wa" href="'+waLink(phone)+'" target="_blank">💬</a>' : ''}
           <button class="btn sec" onclick="openLead(${l.id})">Ficha / Mover</button>
@@ -440,16 +475,24 @@ async function searchNotas(){
 // ---- PIPELINE ----
 async function renderPipe(){
   $('wrap').innerHTML = '<div class="spin">Cargando pipeline…</div>';
+  const filters = `<div class="chips">
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderPipe()">👤 Mis leads</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderPipe()">🏢 Todos</div>
+  </div>
+  <div class="chips">
+    <div class="chip${EXCLUDE_NEG?' on':''}" onclick="EXCLUDE_NEG=1;renderPipe()">✅ Solo activos</div>
+    <div class="chip${EXCLUDE_NEG?'':' on'}" onclick="EXCLUDE_NEG=0;renderPipe()">📁 Incluir descartados</div>
+  </div>`;
   try{
-    const j = await api('/api/pipeline');
+    const j = await api('/api/pipeline?mine='+MINE_ONLY+'&exclude_neg='+EXCLUDE_NEG);
     const total = j.pipeline.reduce((a,b)=>a+b.count,0);
-    $('wrap').innerHTML = '<div class="card"><div class="nm">Total: '+total+' leads</div></div>' +
+    $('wrap').innerHTML = filters + '<div class="card"><div class="nm">Total: '+total+' leads</div></div>' +
       j.pipeline.map(p => `
       <div class="card" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="CUR_STAGE=${p.stage_id};go('leads')">
         <div class="nm" style="margin:0">${esc(p.stage)}</div>
         <div style="font-size:20px;font-weight:700;color:var(--verde)">${p.count}</div>
       </div>`).join('');
-  }catch(e){ $('wrap').innerHTML = '<div class="err">'+esc(e.message)+'</div>'; }
+  }catch(e){ $('wrap').innerHTML = filters + '<div class="err">'+esc(e.message)+'</div>'; }
 }
 
 // ---- FICHA LEAD ----
