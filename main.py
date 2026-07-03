@@ -666,4 +666,3 @@ def api_lead_one(id: int = 0):
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTML_PAGE
-i
