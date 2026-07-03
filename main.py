@@ -60,6 +60,28 @@ def clean_html(text):
     return text.strip()
 
 
+DATE_IN_TEXT_RE = re.compile(r"(\d{2})-(\d{2})-(\d{4})")
+
+
+def extract_lead_date(description, create_date):
+    """Extrae la fecha DD-MM-YYYY escrita al inicio de la nota (fecha real de
+    llegada del lead). Si no la encuentra, usa create_date como respaldo."""
+    if description:
+        m = DATE_IN_TEXT_RE.search(description)
+        if m:
+            d, mo, y = m.groups()
+            try:
+                return datetime(int(y), int(mo), int(d))
+            except ValueError:
+                pass
+    if create_date:
+        try:
+            return datetime.strptime(create_date, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            pass
+    return datetime.min
+
+
 # ---------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------
@@ -85,12 +107,25 @@ def api_leads(stage_id: int = 0, q: str = "", limit: int = 40, mine: int = 1, or
         if q:
             domain += ["|", "|", ["name", "ilike", q], ["contact_name", "ilike", q],
                        ["partner_name", "ilike", q]]
-        order_clause = "create_date asc" if order == "oldest" else "create_date desc"
+        # Traemos un lote más grande para poder re-ordenar por la fecha real
+        # (la que viene escrita en la nota), no por create_date de Odoo.
+        fetch_limit = max(limit * 6, 240)
         leads = odoo("crm.lead", "search_read", [domain], {
             "fields": ["id", "name", "contact_name", "partner_name", "phone",
                        "email_from", "stage_id", "description", "create_date",
                        "write_date", "expected_revenue", "user_id"],
-            "limit": limit, "order": order_clause})
+            "limit": fetch_limit, "order": "create_date desc"})
+
+        for l in leads:
+            dt = extract_lead_date(l.get("description"), l.get("create_date"))
+            l["_sort_dt"] = dt
+            l["lead_date"] = dt.strftime("%Y-%m-%d") if dt != datetime.min else ""
+
+        leads.sort(key=lambda l: l["_sort_dt"], reverse=(order != "oldest"))
+        leads = leads[:limit]
+        for l in leads:
+            del l["_sort_dt"]
+
         return {"ok": True, "leads": leads}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -324,6 +359,7 @@ let CUR_STAGE = 0;
 let MINE_ONLY = 1;
 let ORDER = 'recent';
 let EXCLUDE_NEG = 1;
+let SEARCH_Q = '';
 
 const $ = id => document.getElementById(id);
 const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -400,31 +436,39 @@ async function renderLeads(){
   const chips = '<div class="chips"><div class="chip'+(CUR_STAGE===0?' on':'')+'" onclick="setStage(0)">Todos</div>' +
     STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+esc(s.name)+'</div>').join('') + '</div>';
   const filters = `<div class="chips">
-    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;loadLeads()">👤 Mis leads</div>
-    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;loadLeads()">🏢 Todos</div>
-    <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';loadLeads()">🕐 Más reciente</div>
-    <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';loadLeads()">📅 Más antiguo</div>
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderLeads()">👤 Mis leads</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderLeads()">🏢 Todos</div>
+    <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';renderLeads()">🕐 Más reciente</div>
+    <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';renderLeads()">📅 Más antiguo</div>
+    <div class="chip" onclick="clearFilters()">🗑 Borrar filtros</div>
   </div>`;
   $('wrap').innerHTML = `
     <div class="search">
-      <input id="qLeads" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')loadLeads()">
-      <button onclick="loadLeads()">Buscar</button>
+      <input id="qLeads" value="${esc(SEARCH_Q)}" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')submitSearch()">
+      <button onclick="submitSearch()">Buscar</button>
     </div>` + chips + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
   loadLeads();
 }
 
 function setStage(id){ CUR_STAGE = id; renderLeads(); }
 
+function submitSearch(){ SEARCH_Q = $('qLeads').value.trim(); loadLeads(); }
+
+function clearFilters(){
+  CUR_STAGE = 0; MINE_ONLY = 1; ORDER = 'recent'; SEARCH_Q = '';
+  renderLeads();
+  toast('Filtros borrados');
+}
+
 async function loadLeads(){
-  const q = $('qLeads') ? $('qLeads').value.trim() : '';
   $('list').innerHTML = '<div class="spin">Cargando…</div>';
   try{
-    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(q)+'&mine='+MINE_ONLY+'&order='+ORDER);
+    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(SEARCH_Q)+'&mine='+MINE_ONLY+'&order='+ORDER);
     if(!j.leads.length){ $('list').innerHTML = '<div class="empty">Sin leads en esta vista.</div>'; return; }
     $('list').innerHTML = j.leads.map(l => {
       const phone = l.phone || '';
       const desc = (l.description||'').replace(/<[^>]+>/g,'').trim();
-      const fecha = (l.create_date||'').split(' ')[0];
+      const fecha = l.lead_date || (l.create_date||'').split(' ')[0];
       return `<div class="card">
         <span class="badge">${l.stage_id ? esc(l.stage_id[1]) : '—'}</span>
         <div class="nm">${esc(l.name)}</div>
