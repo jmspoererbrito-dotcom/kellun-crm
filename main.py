@@ -117,9 +117,14 @@ def api_leads(stage_id: int = 0, q: str = "", limit: int = 40, mine: int = 1, or
         if q:
             domain += ["|", "|", ["name", "ilike", q], ["contact_name", "ilike", q],
                        ["partner_name", "ilike", q]]
-        # Traemos un lote más grande para poder re-ordenar por la fecha real
-        # (la que viene escrita en la nota), no por create_date de Odoo.
-        fetch_limit = max(limit * 6, 240)
+
+        total = odoo("crm.lead", "search_count", [domain])
+
+        # Traemos TODO el conjunto que calza (hasta un tope de seguridad) para
+        # poder re-ordenar por la fecha real escrita en la nota, no por
+        # create_date de Odoo, que puede no coincidir con la fecha real.
+        SAFETY_CAP = 2000
+        fetch_limit = min(total, SAFETY_CAP)
         leads = odoo("crm.lead", "search_read", [domain], {
             "fields": ["id", "name", "contact_name", "partner_name", "phone",
                        "email_from", "stage_id", "description", "create_date",
@@ -136,7 +141,7 @@ def api_leads(stage_id: int = 0, q: str = "", limit: int = 40, mine: int = 1, or
         for l in leads:
             del l["_sort_dt"]
 
-        return {"ok": True, "leads": leads}
+        return {"ok": True, "leads": leads, "total": total, "shown": len(leads)}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
@@ -380,6 +385,7 @@ let MINE_ONLY = 1;
 let ORDER = 'recent';
 let EXCLUDE_NEG = 1;
 let SEARCH_Q = '';
+let LEADS_LIMIT = 40;
 
 const $ = id => document.getElementById(id);
 const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -480,22 +486,24 @@ async function renderLeads(){
   loadLeads();
 }
 
-function setStage(id){ CUR_STAGE = id; renderLeads(); }
+function setStage(id){ CUR_STAGE = id; LEADS_LIMIT = 40; renderLeads(); }
 
-function submitSearch(){ SEARCH_Q = $('qLeads').value.trim(); loadLeads(); }
+function submitSearch(){ SEARCH_Q = $('qLeads').value.trim(); LEADS_LIMIT = 40; loadLeads(); }
 
 function clearFilters(){
-  CUR_STAGE = 0; MINE_ONLY = 1; ORDER = 'recent'; SEARCH_Q = '';
+  CUR_STAGE = 0; MINE_ONLY = 1; ORDER = 'recent'; SEARCH_Q = ''; LEADS_LIMIT = 40;
   renderLeads();
   toast('Filtros borrados');
 }
 
+function loadMore(){ LEADS_LIMIT += 40; loadLeads(); }
+
 async function loadLeads(){
   $('list').innerHTML = '<div class="spin">Cargando…</div>';
   try{
-    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(SEARCH_Q)+'&mine='+MINE_ONLY+'&order='+ORDER);
+    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(SEARCH_Q)+'&mine='+MINE_ONLY+'&order='+ORDER+'&limit='+LEADS_LIMIT);
     if(!j.leads.length){ $('list').innerHTML = '<div class="empty">Sin leads en esta vista.</div>'; return; }
-    $('list').innerHTML = j.leads.map(l => {
+    const cards = j.leads.map(l => {
       const phone = l.phone || '';
       const desc = (l.description||'').replace(/<[^>]+>/g,'').trim();
       const fecha = l.lead_date || (l.create_date||'').split(' ')[0];
@@ -512,6 +520,10 @@ async function loadLeads(){
         </div>
       </div>`;
     }).join('');
+    const counter = `<div class="meta" style="text-align:center;margin:8px 0">Mostrando ${j.shown} de ${j.total}</div>`;
+    const moreBtn = j.shown < j.total
+      ? `<button class="btn sec" style="width:100%;margin-bottom:20px" onclick="loadMore()">Cargar 40 más</button>` : '';
+    $('list').innerHTML = cards + counter + moreBtn;
   }catch(e){ $('list').innerHTML = '<div class="err">'+esc(e.message)+'</div>'; }
 }
 
