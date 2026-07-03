@@ -511,6 +511,21 @@ let BULK_TEMPLATE = null;
 const $ = id => document.getElementById(id);
 const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+const STAGE_EMOJI = [
+  [/desech/, '🗑️'], [/no responde/, '🔇'], [/no clasific/, '❓'], [/recicl/, '♻️'],
+  [/volver a llamar/, '🔁'], [/nuevo/, '🆕'], [/contactad/, '📇'],
+  [/captaci[oó]n/, '🤝'], [/reuni[oó]n/, '📅'], [/presentaci[oó]n/, '📊'],
+  [/antecedent/, '📄'], [/documento/, '📁'], [/aprobad/, '✅'],
+  [/cr[eé]dito|evaluaci[oó]n/, '💳'], [/propuesta final/, '📝'],
+  [/reserva|promesa/, '🔒'], [/escritura/, '✍️'], [/ganado|captado/, '🏆'],
+];
+function stageIcon(name){
+  const n = (name||'').toLowerCase();
+  for(const [re, emo] of STAGE_EMOJI){ if(re.test(n)) return emo; }
+  return '🏷️';
+}
+function stageLabel(name){ return stageIcon(name)+' '+esc(name); }
+
 function toast(msg){
   const t = $('toast'); t.textContent = msg; t.classList.add('on');
   setTimeout(()=>t.classList.remove('on'), 2200);
@@ -543,13 +558,15 @@ function waLink(p, msg){
 }
 function greet(nombre){ return nombre ? `Hola ${nombre}, ` : 'Hola, '; }
 
+function greetE(nombre){ return nombre ? `👋 ${nombre}, ` : '👋 '; }
+
 const WA_TEMPLATES = [
   { key: 'primer', label: 'Primer contacto',
-    fn: (nombre, proyecto) => `${greet(nombre)}habla Juan Manuel de Kellun Gestión Inmobiliaria. Te contacto por tu consulta del proyecto ${proyecto}. ¿Tienes unos minutos para conversar?` },
+    fn: (nombre, proyecto) => `${greetE(nombre)}soy Juan Manuel de Kellun Gestión Inmobiliaria. Te contacto por tu consulta del proyecto *${proyecto}*. ¿Tienes unos minutos para conversar?` },
   { key: 'nocontesta', label: 'No contesta llamada',
-    fn: (nombre, proyecto) => `${greet(nombre)}soy Juan Manuel de Kellun Gestión Inmobiliaria. Te llamé por el proyecto ${proyecto} pero no logré comunicarme. ¿Qué horario te acomoda?` },
+    fn: (nombre, proyecto) => `${greetE(nombre)}soy Juan Manuel de Kellun Gestión Inmobiliaria. Te llamé por el proyecto *${proyecto}* pero no logré comunicarme. ¿Qué horario te acomoda?` },
   { key: 'sigueinteres', label: 'Sigue interesado',
-    fn: (nombre, proyecto) => `${greet(nombre)}soy Juan Manuel de Kellun. ¿Sigues interesado en el proyecto ${proyecto}? Quedo atento.` },
+    fn: (nombre, proyecto) => `${greetE(nombre)}soy Juan Manuel de Kellun Gestión Inmobiliaria. ¿Sigues interesado en el proyecto *${proyecto}*? Quedo atento.` },
 ];
 
 function leadFirstName(l){ return (l.contact_name || '').trim().split(' ')[0] || ''; }
@@ -596,8 +613,8 @@ function render(){
 // ---- HOY ----
 async function renderHoy(){
   const filters = `<div class="chips">
-    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderHoy()">👤 Mis leads</div>
-    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderHoy()">🏢 Todos</div>
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderHoy()">👤 Mías</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderHoy()">🏢 Todas</div>
   </div>`;
   $('wrap').innerHTML = filters + '<div class="spin">Buscando pendientes de hoy…</div>';
   try{
@@ -610,7 +627,7 @@ async function renderHoy(){
       <div class="card">
         <span class="badge pill-hoy">⏰ ${esc(r.deadline)} · ${esc(r.activity)}</span>
         <div class="nm">${esc(r.lead_name)}</div>
-        <div class="ct">${esc(r.contact)} · ${esc(r.stage)}</div>
+        <div class="ct">${esc(r.contact)} · ${stageLabel(r.stage)}</div>
         ${r.note ? '<div class="note-prev">'+esc(r.note)+'</div>' : ''}
         <div class="row">
           ${r.phone ? '<a class="btn call" href="'+telLink(r.phone)+'">📞 Llamar</a><button class="btn wa" onclick="openWaPicker('+r.lead_id+')">💬 WhatsApp</button>' : ''}
@@ -623,18 +640,18 @@ async function renderHoy(){
 // ---- LEADS ----
 async function renderLeads(){
   const chips = '<div class="chips"><div class="chip'+(CUR_STAGE===0?' on':'')+'" onclick="setStage(0)">Todos</div>' +
-    STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+esc(s.name)+'</div>').join('') + '</div>';
+    STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+stageLabel(s.name)+'</div>').join('') + '</div>';
   const projectChips = PROJECTS.length ? ('<div class="chips">' +
-    '<div class="chip'+(CUR_PROJECT===''?' on':'')+'" onclick="setProject(\\'\\')">🏗 Todos los proyectos</div>' +
+    '<div class="chip'+(CUR_PROJECT===''?' on':'')+'" onclick="setProject(\\'\\')">🏗 Proyectos</div>' +
     PROJECTS.map(p => '<div class="chip'+(CUR_PROJECT===p.name?' on':'')+'" onclick="setProject(\\''+p.name.replace(/'/g,"\\\\'")+'\\')">'+esc(p.name)+' ('+p.count+')</div>').join('') +
     '</div>') : '';
   const filters = `<div class="chips">
-    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderLeads()">👤 Mis leads</div>
-    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderLeads()">🏢 Todos</div>
-    <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';renderLeads()">🕐 Más reciente</div>
-    <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';renderLeads()">📅 Más antiguo</div>
-    <div class="chip" onclick="clearFilters()">🗑 Borrar filtros</div>
-    <div class="chip" style="background:#25D366;color:white;border-color:#25D366" onclick="startBulkWhatsApp()">📤 Envío masivo</div>
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderLeads()">👤 Mías</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderLeads()">🏢 Todas</div>
+    <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';renderLeads()">🕐 Recientes</div>
+    <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';renderLeads()">📅 Antiguos</div>
+    <div class="chip" onclick="clearFilters()">🗑 Limpiar</div>
+    <div class="chip" style="background:#25D366;color:white;border-color:#25D366" onclick="startBulkWhatsApp()">📤 Masivo</div>
   </div>`;
   $('wrap').innerHTML = `
     <div class="search">
@@ -682,7 +699,7 @@ async function loadLeads(){
       const fecha = l.lead_date || (l.create_date||'').split(' ')[0];
       const asignado = l.user_id ? l.user_id[1] : 'Sin asignar';
       return `<div class="card">
-        <span class="badge">${l.stage_id ? esc(l.stage_id[1]) : '—'}</span>
+        <span class="badge">${l.stage_id ? stageLabel(l.stage_id[1]) : '—'}</span>
         <div class="nm">${esc(l.name)}</div>
         <div class="ct">${esc(l.contact_name||l.partner_name||'')} ${phone ? '· '+esc(phone) : ''}</div>
         ${desc ? '<div class="note-prev">'+esc(desc.slice(0,200))+'</div>' : ''}
@@ -705,8 +722,8 @@ let NOTAS_Q = '';
 let NOTAS_LIMIT = 150;
 function renderNotas(){
   const filters = `<div class="chips">
-    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderNotas()">👤 Mis leads</div>
-    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderNotas()">🏢 Todos</div>
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderNotas()">👤 Mías</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderNotas()">🏢 Todas</div>
   </div>`;
   $('wrap').innerHTML = `
     <div class="search">
@@ -733,7 +750,7 @@ async function fetchNotas(){
     if(!j.results.length){ $('list').innerHTML = '<div class="empty">No encontré notas con "'+esc(NOTAS_Q)+'".</div>'; return; }
     const cards = j.results.map(r => `
       <div class="card">
-        <span class="badge">${esc(r.stage)}</span>
+        <span class="badge">${stageLabel(r.stage)}</span>
         <div class="nm">${esc(r.lead_name)}</div>
         <div class="ct">${esc(r.contact)} ${r.phone ? '· '+esc(r.phone) : ''}</div>
         <div class="note-prev">${esc(r.note)}</div>
@@ -753,12 +770,12 @@ async function fetchNotas(){
 async function renderPipe(){
   $('wrap').innerHTML = '<div class="spin">Cargando pipeline…</div>';
   const filters = `<div class="chips">
-    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderPipe()">👤 Mis leads</div>
-    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderPipe()">🏢 Todos</div>
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderPipe()">👤 Mías</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderPipe()">🏢 Todas</div>
   </div>
   <div class="chips">
-    <div class="chip${EXCLUDE_NEG?' on':''}" onclick="EXCLUDE_NEG=1;renderPipe()">✅ Solo activos</div>
-    <div class="chip${EXCLUDE_NEG?'':' on'}" onclick="EXCLUDE_NEG=0;renderPipe()">📁 Incluir descartados</div>
+    <div class="chip${EXCLUDE_NEG?' on':''}" onclick="EXCLUDE_NEG=1;renderPipe()">✅ Activos</div>
+    <div class="chip${EXCLUDE_NEG?'':' on'}" onclick="EXCLUDE_NEG=0;renderPipe()">📁 Descartados</div>
   </div>`;
   try{
     const j = await api('/api/pipeline?mine='+MINE_ONLY+'&exclude_neg='+EXCLUDE_NEG);
@@ -766,7 +783,7 @@ async function renderPipe(){
     $('wrap').innerHTML = filters + '<div class="card"><div class="nm">Total: '+total+' leads</div></div>' +
       j.pipeline.map(p => `
       <div class="card" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer" onclick="CUR_STAGE=${p.stage_id};go('leads')">
-        <div class="nm" style="margin:0">${esc(p.stage)}</div>
+        <div class="nm" style="margin:0">${stageLabel(p.stage)}</div>
         <div style="font-size:20px;font-weight:700;color:var(--verde)">${p.count}</div>
       </div>`).join('');
   }catch(e){ $('wrap').innerHTML = filters + '<div class="err">'+esc(e.message)+'</div>'; }
@@ -856,7 +873,7 @@ async function openLead(id){
     const phone = lead ? (lead.phone || '') : '';
     const desc = lead ? (lead.description||'').replace(/<[^>]+>/g,'').trim() : '';
     const stageOpts = STAGES.map(s =>
-      '<option value="'+s.id+'"'+(lead && lead.stage_id && lead.stage_id[0]===s.id?' selected':'')+'>'+esc(s.name)+'</option>').join('');
+      '<option value="'+s.id+'"'+(lead && lead.stage_id && lead.stage_id[0]===s.id?' selected':'')+'>'+stageLabel(s.name)+'</option>').join('');
 
     $('sheet').innerHTML = `
       <button class="xbtn" onclick="$('modal').classList.remove('on')">✕</button>
