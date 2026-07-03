@@ -86,6 +86,16 @@ def extract_lead_date(description, create_date):
 # API endpoints
 # ---------------------------------------------------------------
 
+@app.get("/api/me")
+def api_me():
+    try:
+        uid = current_uid()
+        recs = odoo("res.users", "read", [[uid]], {"fields": ["id", "name", "login"]})
+        return {"ok": True, "me": recs[0] if recs else {"id": uid}}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/stages")
 def api_stages():
     try:
@@ -154,23 +164,28 @@ def api_lead_notes(lead_id: int):
 
 
 @app.get("/api/search_notes")
-def api_search_notes(q: str, limit: int = 50):
+def api_search_notes(q: str, limit: int = 50, mine: int = 1):
     """Busca texto dentro de las notas del chatter de todos los leads."""
     try:
+        # Pedimos más mensajes de lo pedido porque luego filtramos por vendedor
+        fetch_limit = limit * 4 if mine else limit
         msgs = odoo("mail.message", "search_read",
                     [[["model", "=", "crm.lead"], ["body", "ilike", q]]],
                     {"fields": ["body", "date", "res_id", "author_id"],
-                     "limit": limit, "order": "date desc"})
+                     "limit": fetch_limit, "order": "date desc"})
         lead_ids = list({m["res_id"] for m in msgs})
         leads = {}
         if lead_ids:
             recs = odoo("crm.lead", "read", [lead_ids],
-                        {"fields": ["id", "name", "contact_name", "phone", "stage_id"]})
+                        {"fields": ["id", "name", "contact_name", "phone", "stage_id", "user_id"]})
             leads = {r["id"]: r for r in recs}
+        uid = current_uid() if mine else None
         results = []
         for m in msgs:
             lead = leads.get(m["res_id"])
             if not lead:
+                continue
+            if mine and (not lead.get("user_id") or lead["user_id"][0] != uid):
                 continue
             results.append({
                 "lead_id": m["res_id"],
@@ -181,6 +196,8 @@ def api_search_notes(q: str, limit: int = 50):
                 "date": m.get("date", ""),
                 "note": clean_html(m.get("body", ""))[:300]
             })
+            if len(results) >= limit:
+                break
         return {"ok": True, "results": results}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -212,12 +229,15 @@ async def api_add_note(lead_id: int, request: Request):
 
 
 @app.get("/api/today")
-def api_today():
+def api_today(mine: int = 1):
     """Actividades planificadas para hoy o vencidas."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
+        domain = [["res_model", "=", "crm.lead"], ["date_deadline", "<=", today]]
+        if mine:
+            domain.append(["user_id", "=", current_uid()])
         acts = odoo("mail.activity", "search_read",
-                    [[["res_model", "=", "crm.lead"], ["date_deadline", "<=", today]]],
+                    [domain],
                     {"fields": ["res_id", "summary", "date_deadline", "activity_type_id", "note"],
                      "limit": 50, "order": "date_deadline"})
         lead_ids = list({a["res_id"] for a in acts})
@@ -394,6 +414,12 @@ async function init(){
     const j = await api('/api/stages');
     STAGES = j.stages;
     $('st').textContent = '● conectado';
+    try{
+      const me = await api('/api/me');
+      if(me.me && me.me.name){
+        $('st').textContent = '● ' + me.me.name;
+      }
+    }catch(_){}
     render();
   }catch(e){
     $('st').textContent = 'sin conexión';
@@ -410,14 +436,18 @@ function render(){
 
 // ---- HOY ----
 async function renderHoy(){
-  $('wrap').innerHTML = '<div class="spin">Buscando pendientes de hoy…</div>';
+  const filters = `<div class="chips">
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderHoy()">👤 Mis leads</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderHoy()">🏢 Todos</div>
+  </div>`;
+  $('wrap').innerHTML = filters + '<div class="spin">Buscando pendientes de hoy…</div>';
   try{
-    const j = await api('/api/today');
+    const j = await api('/api/today?mine='+MINE_ONLY);
     if(!j.results.length){
-      $('wrap').innerHTML = '<div class="empty">✅ Sin actividades pendientes para hoy.<br><br>Revisa la pestaña Leads para ver tu pipeline.</div>';
+      $('wrap').innerHTML = filters + '<div class="empty">✅ Sin actividades pendientes para hoy.<br><br>Revisa la pestaña Leads para ver tu pipeline.</div>';
       return;
     }
-    $('wrap').innerHTML = j.results.map(r => `
+    $('wrap').innerHTML = filters + j.results.map(r => `
       <div class="card">
         <span class="badge pill-hoy">⏰ ${esc(r.deadline)} · ${esc(r.activity)}</span>
         <div class="nm">${esc(r.lead_name)}</div>
@@ -469,12 +499,13 @@ async function loadLeads(){
       const phone = l.phone || '';
       const desc = (l.description||'').replace(/<[^>]+>/g,'').trim();
       const fecha = l.lead_date || (l.create_date||'').split(' ')[0];
+      const asignado = l.user_id ? l.user_id[1] : 'Sin asignar';
       return `<div class="card">
         <span class="badge">${l.stage_id ? esc(l.stage_id[1]) : '—'}</span>
         <div class="nm">${esc(l.name)}</div>
         <div class="ct">${esc(l.contact_name||l.partner_name||'')} ${phone ? '· '+esc(phone) : ''}</div>
         ${desc ? '<div class="note-prev">'+esc(desc.slice(0,200))+'</div>' : ''}
-        <div class="meta">🗓 Ingresó: ${esc(fecha)}</div>
+        <div class="meta">🗓 Ingresó: ${esc(fecha)} · 👤 ${esc(asignado)}</div>
         <div class="row">
           ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞</a><a class="btn wa" href="'+waLink(phone)+'" target="_blank">💬</a>' : ''}
           <button class="btn sec" onclick="openLead(${l.id})">Ficha / Mover</button>
@@ -485,22 +516,26 @@ async function loadLeads(){
 }
 
 // ---- NOTAS ----
+let NOTAS_Q = '';
 function renderNotas(){
+  const filters = `<div class="chips">
+    <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderNotas()">👤 Mis leads</div>
+    <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderNotas()">🏢 Todos</div>
+  </div>`;
   $('wrap').innerHTML = `
     <div class="search">
-      <input id="qNotas" placeholder='Ej: "llamar", "19:00", "propuesta"…' onkeypress="if(event.key==='Enter')searchNotas()">
+      <input id="qNotas" value="${esc(NOTAS_Q)}" placeholder='Ej: "llamar", "19:00", "propuesta"…' onkeypress="if(event.key==='Enter')searchNotas()">
       <button onclick="searchNotas()">Buscar</button>
-    </div>
-    <div id="list"><div class="empty">Busca cualquier palabra dentro de tus notas.<br>Ej: <b>llamar</b>, <b>documentos</b>, un nombre o un proyecto.</div></div>`;
+    </div>` + filters + `<div id="list"><div class="empty">Busca cualquier palabra dentro de tus notas.<br>Ej: <b>llamar</b>, <b>documentos</b>, un nombre o un proyecto.</div></div>`;
 }
 
 async function searchNotas(){
-  const q = $('qNotas').value.trim();
-  if(!q) return;
+  NOTAS_Q = $('qNotas').value.trim();
+  if(!NOTAS_Q) return;
   $('list').innerHTML = '<div class="spin">Buscando en las notas…</div>';
   try{
-    const j = await api('/api/search_notes?q='+encodeURIComponent(q));
-    if(!j.results.length){ $('list').innerHTML = '<div class="empty">No encontré notas con "'+esc(q)+'".</div>'; return; }
+    const j = await api('/api/search_notes?q='+encodeURIComponent(NOTAS_Q)+'&mine='+MINE_ONLY);
+    if(!j.results.length){ $('list').innerHTML = '<div class="empty">No encontré notas con "'+esc(NOTAS_Q)+'".</div>'; return; }
     $('list').innerHTML = j.results.map(r => `
       <div class="card">
         <span class="badge">${esc(r.stage)}</span>
@@ -631,3 +666,4 @@ def api_lead_one(id: int = 0):
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTML_PAGE
+i
