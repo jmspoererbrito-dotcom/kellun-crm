@@ -82,6 +82,38 @@ def extract_lead_date(description, create_date):
     return datetime.min
 
 
+# TODO Juan Manuel: agrega aquí cada proyecto — la clave es exactamente el
+# texto que aparece pegado a la fecha en la nota (puede ser una sigla como
+# "PDM" o el nombre completo como "Peumayen"), y el valor es el nombre real
+# que quieres que se muestre.
+PROJECT_NAMES = {
+    "FL3": "Fuente de Lomas 3",
+    "FMC": "Fuente de Miguel Collao",
+    "PDM": "Pie de Monte",
+    "ADC": "Altos de Collao",
+    "PEUMAYEN": "Peumayen",
+    # "CISS": "Nombre real del proyecto",
+}
+
+PROJECT_TOKEN_RE = re.compile(
+    r"\d{2}-\d{2}-\d{4}\s*(" + "|".join(re.escape(k) for k in PROJECT_NAMES.keys()) + r")\b",
+    re.IGNORECASE
+)
+
+
+def extract_project(description):
+    """Extrae el proyecto (código o nombre) escrito junto a la fecha en la nota,
+    usando la lista de proyectos conocidos en PROJECT_NAMES."""
+    if not description or not PROJECT_NAMES:
+        return None
+    text = clean_html(description)
+    m = PROJECT_TOKEN_RE.search(text)
+    if not m:
+        return None
+    code = m.group(1).upper()
+    return PROJECT_NAMES.get(code, code)
+
+
 # ---------------------------------------------------------------
 # API endpoints
 # ---------------------------------------------------------------
@@ -106,8 +138,31 @@ def api_stages():
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+@app.get("/api/projects")
+def api_projects(mine: int = 1):
+    """Detecta los proyectos presentes en las notas de tus leads."""
+    try:
+        domain = []
+        if mine:
+            domain.append(["user_id", "=", current_uid()])
+        total = odoo("crm.lead", "search_count", [domain])
+        fetch_limit = min(total, 500)
+        leads = odoo("crm.lead", "search_read", [domain],
+                     {"fields": ["description"], "limit": fetch_limit, "order": "create_date desc"})
+        counts = {}
+        for l in leads:
+            p = extract_project(l.get("description"))
+            if p:
+                counts[p] = counts.get(p, 0) + 1
+        result = sorted(({"name": k, "count": v} for k, v in counts.items()),
+                         key=lambda x: -x["count"])
+        return {"ok": True, "projects": result}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/leads")
-def api_leads(stage_id: int = 0, q: str = "", limit: int = 40, mine: int = 1, order: str = "recent"):
+def api_leads(stage_id: int = 0, q: str = "", limit: int = 300, mine: int = 1, order: str = "recent", project: str = ""):
     try:
         domain = []
         if stage_id:
@@ -119,22 +174,29 @@ def api_leads(stage_id: int = 0, q: str = "", limit: int = 40, mine: int = 1, or
                        ["partner_name", "ilike", q]]
 
         total = odoo("crm.lead", "search_count", [domain])
+        if total == 0:
+            return {"ok": True, "leads": [], "total": 0, "shown": 0}
 
         # Traemos TODO el conjunto que calza (hasta un tope de seguridad) para
         # poder re-ordenar por la fecha real escrita en la nota, no por
         # create_date de Odoo, que puede no coincidir con la fecha real.
-        SAFETY_CAP = 2000
+        SAFETY_CAP = 500
         fetch_limit = min(total, SAFETY_CAP)
         leads = odoo("crm.lead", "search_read", [domain], {
             "fields": ["id", "name", "contact_name", "partner_name", "phone",
                        "email_from", "stage_id", "description", "create_date",
-                       "write_date", "expected_revenue", "user_id"],
+                       "user_id"],
             "limit": fetch_limit, "order": "create_date desc"})
 
         for l in leads:
             dt = extract_lead_date(l.get("description"), l.get("create_date"))
             l["_sort_dt"] = dt
             l["lead_date"] = dt.strftime("%Y-%m-%d") if dt != datetime.min else ""
+            l["project"] = extract_project(l.get("description"))
+
+        if project:
+            leads = [l for l in leads if l.get("project") == project]
+            total = len(leads)
 
         leads.sort(key=lambda l: l["_sort_dt"], reverse=(order != "oldest"))
         leads = leads[:limit]
@@ -169,11 +231,12 @@ def api_lead_notes(lead_id: int):
 
 
 @app.get("/api/search_notes")
-def api_search_notes(q: str, limit: int = 50, mine: int = 1):
+def api_search_notes(q: str, limit: int = 30, mine: int = 1):
     """Busca texto dentro de las notas del chatter de todos los leads."""
     try:
-        # Pedimos más mensajes de lo pedido porque luego filtramos por vendedor
-        fetch_limit = limit * 4 if mine else limit
+        # Cuando filtramos por vendedor, muchos mensajes se van a descartar,
+        # así que pedimos un lote bastante más grande para alcanzar a llenar 'limit'.
+        fetch_limit = min(max(limit * 8, 150), 900) if mine else limit
         msgs = odoo("mail.message", "search_read",
                     [[["model", "=", "crm.lead"], ["body", "ilike", q]]],
                     {"fields": ["body", "date", "res_id", "author_id"],
@@ -203,7 +266,7 @@ def api_search_notes(q: str, limit: int = 50, mine: int = 1):
             })
             if len(results) >= limit:
                 break
-        return {"ok": True, "results": results}
+        return {"ok": True, "results": results, "shown": len(results)}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
@@ -228,6 +291,51 @@ async def api_add_note(lead_id: int, request: Request):
             return JSONResponse({"ok": False, "error": "Nota vacía"}, status_code=400)
         odoo("crm.lead", "message_post", [[lead_id]],
              {"body": note.replace("\n", "<br/>")})
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+_activity_type_cache = {"id": None}
+
+
+def default_activity_type_id():
+    """Busca un tipo de actividad razonable (Llamada / To-Do) para usar por defecto."""
+    if _activity_type_cache["id"] is not None:
+        return _activity_type_cache["id"]
+    types = odoo("mail.activity.type", "search_read", [[]], {"fields": ["id", "name"], "limit": 50})
+    chosen = None
+    for t in types:
+        if any(k in t["name"].lower() for k in ["llamada", "call", "to-do", "to do", "tarea"]):
+            chosen = t["id"]
+            break
+    if chosen is None and types:
+        chosen = types[0]["id"]
+    _activity_type_cache["id"] = chosen
+    return chosen
+
+
+@app.post("/api/lead/{lead_id}/reminder")
+async def api_add_reminder(lead_id: int, request: Request):
+    """Crea un recordatorio (actividad) real en Odoo para este lead, que
+    luego aparecerá en la pestaña Hoy cuando llegue la fecha."""
+    try:
+        data = await request.json()
+        date_deadline = (data.get("date_deadline") or "").strip()
+        summary = (data.get("summary") or "Seguimiento").strip()
+        if not date_deadline:
+            return JSONResponse({"ok": False, "error": "Falta la fecha"}, status_code=400)
+        vals = {
+            "res_model": "crm.lead",
+            "res_id": lead_id,
+            "date_deadline": date_deadline,
+            "summary": summary,
+            "user_id": current_uid(),
+        }
+        act_type = default_activity_type_id()
+        if act_type:
+            vals["activity_type_id"] = act_type
+        odoo("mail.activity", "create", [vals])
         return {"ok": True}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -385,7 +493,13 @@ let MINE_ONLY = 1;
 let ORDER = 'recent';
 let EXCLUDE_NEG = 1;
 let SEARCH_Q = '';
-let LEADS_LIMIT = 40;
+let LEADS_LIMIT = 300;
+let LAST_LEADS = [];
+let PROJECTS = [];
+let CUR_PROJECT = '';
+let BULK_QUEUE = [];
+let BULK_IDX = 0;
+let BULK_TEMPLATE = null;
 
 const $ = id => document.getElementById(id);
 const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -403,10 +517,32 @@ async function api(path, opts){
 }
 
 function telLink(p){ return 'tel:' + (p||'').replace(/[^+\\d]/g,''); }
-function waLink(p){
+function waLink(p, msg){
   let n = (p||'').replace(/[^\\d]/g,'');
   if(n.length === 9) n = '56' + n;
-  return 'https://wa.me/' + n;
+  let url = 'https://wa.me/' + n;
+  if(msg) url += '?text=' + encodeURIComponent(msg);
+  return url;
+}
+function greet(nombre){ return nombre ? `Hola ${nombre}, ` : 'Hola, '; }
+
+const WA_TEMPLATES = [
+  { key: 'primer', label: 'Primer contacto',
+    fn: (nombre, proyecto) => `${greet(nombre)}habla Juan Manuel de Kellun Gestión Inmobiliaria. Te contacto por tu consulta del proyecto ${proyecto}. ¿Tienes unos minutos para conversar?` },
+  { key: 'nocontesta', label: 'No contesta llamada',
+    fn: (nombre, proyecto) => `${greet(nombre)}soy Juan Manuel de Kellun Gestión Inmobiliaria. Te llamé por el proyecto ${proyecto} pero no logré comunicarme. ¿Qué horario te acomoda?` },
+  { key: 'sigueinteres', label: 'Sigue interesado',
+    fn: (nombre, proyecto) => `${greet(nombre)}soy Juan Manuel de Kellun. ¿Sigues interesado en el proyecto ${proyecto}? Quedo atento.` },
+];
+
+function leadFirstName(l){ return (l.contact_name || '').trim().split(' ')[0] || ''; }
+function leadProject(l){ return l.project || 'que consultaste'; }
+
+function buildMsg(l, templateKey){
+  const nombre = leadFirstName(l);
+  const proyecto = leadProject(l);
+  const t = WA_TEMPLATES.find(t => t.key === templateKey) || WA_TEMPLATES[0];
+  return t.fn(nombre, proyecto);
 }
 
 function go(v){
@@ -460,7 +596,7 @@ async function renderHoy(){
         <div class="ct">${esc(r.contact)} · ${esc(r.stage)}</div>
         ${r.note ? '<div class="note-prev">'+esc(r.note)+'</div>' : ''}
         <div class="row">
-          ${r.phone ? '<a class="btn call" href="'+telLink(r.phone)+'">📞 Llamar</a><a class="btn wa" href="'+waLink(r.phone)+'" target="_blank">💬 WhatsApp</a>' : ''}
+          ${r.phone ? '<a class="btn call" href="'+telLink(r.phone)+'">📞 Llamar</a><button class="btn wa" onclick="openWaPicker('+r.lead_id+')">💬 WhatsApp</button>' : ''}
           <button class="btn sec" onclick="openLead(${r.lead_id})">Ver ficha</button>
         </div>
       </div>`).join('');
@@ -471,27 +607,46 @@ async function renderHoy(){
 async function renderLeads(){
   const chips = '<div class="chips"><div class="chip'+(CUR_STAGE===0?' on':'')+'" onclick="setStage(0)">Todos</div>' +
     STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+esc(s.name)+'</div>').join('') + '</div>';
+  const projectChips = PROJECTS.length ? ('<div class="chips">' +
+    '<div class="chip'+(CUR_PROJECT===''?' on':'')+'" onclick="setProject(\'\')">🏗 Todos los proyectos</div>' +
+    PROJECTS.map(p => '<div class="chip'+(CUR_PROJECT===p.name?' on':'')+'" onclick="setProject(\''+p.name.replace(/'/g,"\\'")+'\')">'+esc(p.name)+' ('+p.count+')</div>').join('') +
+    '</div>') : '';
   const filters = `<div class="chips">
     <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderLeads()">👤 Mis leads</div>
     <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderLeads()">🏢 Todos</div>
     <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';renderLeads()">🕐 Más reciente</div>
     <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';renderLeads()">📅 Más antiguo</div>
     <div class="chip" onclick="clearFilters()">🗑 Borrar filtros</div>
+    <div class="chip" style="background:#25D366;color:white;border-color:#25D366" onclick="startBulkWhatsApp()">📤 Envío masivo</div>
   </div>`;
   $('wrap').innerHTML = `
     <div class="search">
       <input id="qLeads" value="${esc(SEARCH_Q)}" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')submitSearch()">
+      ${SEARCH_Q ? '<button class="btn sec" onclick="SEARCH_Q=\'\';LEADS_LIMIT=300;renderLeads()" style="flex:0">✕</button>' : ''}
       <button onclick="submitSearch()">Buscar</button>
-    </div>` + chips + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
+    </div>` + chips + projectChips + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
   loadLeads();
+  if(PROJECTS_LOADED_FOR !== MINE_ONLY) loadProjects();
 }
 
-function setStage(id){ CUR_STAGE = id; LEADS_LIMIT = 40; renderLeads(); }
+let PROJECTS_LOADED_FOR = null;
+async function loadProjects(){
+  try{
+    const j = await api('/api/projects?mine='+MINE_ONLY);
+    PROJECTS = j.projects || [];
+    PROJECTS_LOADED_FOR = MINE_ONLY;
+    if(VIEW === 'leads') renderLeads();
+  }catch(_){}
+}
 
-function submitSearch(){ SEARCH_Q = $('qLeads').value.trim(); LEADS_LIMIT = 40; loadLeads(); }
+function setProject(name){ CUR_PROJECT = name; LEADS_LIMIT = 300; renderLeads(); }
+
+function setStage(id){ CUR_STAGE = id; LEADS_LIMIT = 300; renderLeads(); }
+
+function submitSearch(){ SEARCH_Q = $('qLeads').value.trim(); LEADS_LIMIT = 300; loadLeads(); }
 
 function clearFilters(){
-  CUR_STAGE = 0; MINE_ONLY = 1; ORDER = 'recent'; SEARCH_Q = ''; LEADS_LIMIT = 40;
+  CUR_STAGE = 0; MINE_ONLY = 1; ORDER = 'recent'; SEARCH_Q = ''; LEADS_LIMIT = 300; CUR_PROJECT = '';
   renderLeads();
   toast('Filtros borrados');
 }
@@ -501,7 +656,8 @@ function loadMore(){ LEADS_LIMIT += 40; loadLeads(); }
 async function loadLeads(){
   $('list').innerHTML = '<div class="spin">Cargando…</div>';
   try{
-    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(SEARCH_Q)+'&mine='+MINE_ONLY+'&order='+ORDER+'&limit='+LEADS_LIMIT);
+    const j = await api('/api/leads?stage_id='+CUR_STAGE+'&q='+encodeURIComponent(SEARCH_Q)+'&mine='+MINE_ONLY+'&order='+ORDER+'&limit='+LEADS_LIMIT+'&project='+encodeURIComponent(CUR_PROJECT));
+    LAST_LEADS = j.leads;
     if(!j.leads.length){ $('list').innerHTML = '<div class="empty">Sin leads en esta vista.</div>'; return; }
     const cards = j.leads.map(l => {
       const phone = l.phone || '';
@@ -515,7 +671,7 @@ async function loadLeads(){
         ${desc ? '<div class="note-prev">'+esc(desc.slice(0,200))+'</div>' : ''}
         <div class="meta">🗓 Ingresó: ${esc(fecha)} · 👤 ${esc(asignado)}</div>
         <div class="row">
-          ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞</a><a class="btn wa" href="'+waLink(phone)+'" target="_blank">💬</a>' : ''}
+          ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞</a><button class="btn wa" onclick="openWaPicker('+l.id+')">💬</button>' : ''}
           <button class="btn sec" onclick="openLead(${l.id})">Ficha / Mover</button>
         </div>
       </div>`;
@@ -529,6 +685,7 @@ async function loadLeads(){
 
 // ---- NOTAS ----
 let NOTAS_Q = '';
+let NOTAS_LIMIT = 150;
 function renderNotas(){
   const filters = `<div class="chips">
     <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderNotas()">👤 Mis leads</div>
@@ -537,18 +694,27 @@ function renderNotas(){
   $('wrap').innerHTML = `
     <div class="search">
       <input id="qNotas" value="${esc(NOTAS_Q)}" placeholder='Ej: "llamar", "19:00", "propuesta"…' onkeypress="if(event.key==='Enter')searchNotas()">
+      ${NOTAS_Q ? '<button class="btn sec" onclick="NOTAS_Q=\'\';renderNotas()" style="flex:0">✕</button>' : ''}
       <button onclick="searchNotas()">Buscar</button>
     </div>` + filters + `<div id="list"><div class="empty">Busca cualquier palabra dentro de tus notas.<br>Ej: <b>llamar</b>, <b>documentos</b>, un nombre o un proyecto.</div></div>`;
+  if(NOTAS_Q) fetchNotas();
 }
 
-async function searchNotas(){
+function searchNotas(){
   NOTAS_Q = $('qNotas').value.trim();
+  NOTAS_LIMIT = 150;
   if(!NOTAS_Q) return;
+  fetchNotas();
+}
+
+function loadMoreNotas(){ NOTAS_LIMIT += 30; fetchNotas(); }
+
+async function fetchNotas(){
   $('list').innerHTML = '<div class="spin">Buscando en las notas…</div>';
   try{
-    const j = await api('/api/search_notes?q='+encodeURIComponent(NOTAS_Q)+'&mine='+MINE_ONLY);
+    const j = await api('/api/search_notes?q='+encodeURIComponent(NOTAS_Q)+'&mine='+MINE_ONLY+'&limit='+NOTAS_LIMIT);
     if(!j.results.length){ $('list').innerHTML = '<div class="empty">No encontré notas con "'+esc(NOTAS_Q)+'".</div>'; return; }
-    $('list').innerHTML = j.results.map(r => `
+    const cards = j.results.map(r => `
       <div class="card">
         <span class="badge">${esc(r.stage)}</span>
         <div class="nm">${esc(r.lead_name)}</div>
@@ -560,6 +726,9 @@ async function searchNotas(){
           <button class="btn sec" onclick="openLead(${r.lead_id})">Ver ficha</button>
         </div>
       </div>`).join('');
+    const moreBtn = j.shown >= NOTAS_LIMIT
+      ? `<button class="btn sec" style="width:100%;margin-bottom:20px" onclick="loadMoreNotas()">Cargar 30 más</button>` : '';
+    $('list').innerHTML = cards + moreBtn;
   }catch(e){ $('list').innerHTML = '<div class="err">'+esc(e.message)+'</div>'; }
 }
 
@@ -586,6 +755,75 @@ async function renderPipe(){
   }catch(e){ $('wrap').innerHTML = filters + '<div class="err">'+esc(e.message)+'</div>'; }
 }
 
+// ---- SELECTOR DE PLANTILLA WHATSAPP ----
+function findLead(id){
+  return LAST_LEADS.find(l => l.id === id) || (BULK_QUEUE.find(l => l.id === id));
+}
+
+async function openWaPicker(id){
+  let l = findLead(id);
+  if(!l){
+    try{ const r = await api('/api/lead_read?id='+id); l = r.lead; }catch(_){}
+  }
+  if(!l){ toast('No encontré el lead'); return; }
+  $('modal').classList.add('on');
+  $('sheet').innerHTML = `
+    <button class="xbtn" onclick="$('modal').classList.remove('on')">✕</button>
+    <h3>💬 ${esc(l.name)}</h3>
+    <div class="sub">${esc(l.contact_name||'')} · ${esc(l.phone||'')} ${l.project ? '· '+esc(l.project) : ''}</div>
+    ${WA_TEMPLATES.map(t => `
+      <div class="card" style="margin-top:10px">
+        <div class="nm" style="font-size:13px">${esc(t.label)}</div>
+        <div class="note-prev">${esc(buildMsg(l, t.key))}</div>
+        <a class="btn wa" style="display:block;text-align:center;text-decoration:none;margin-top:8px;padding:10px"
+           href="${waLink(l.phone, buildMsg(l, t.key))}" target="_blank" onclick="$('modal').classList.remove('on')">Enviar esta</a>
+      </div>`).join('')}`;
+}
+
+// ---- ENVÍO MASIVO WHATSAPP ----
+async function startBulkWhatsApp(){
+  const source = LAST_LEADS.filter(l => l.phone);
+  if(!source.length){ toast('No hay leads con teléfono en esta vista'); return; }
+  BULK_QUEUE = source;
+  BULK_IDX = 0;
+  showBulkModal();
+}
+
+function showBulkModal(){
+  $('modal').classList.add('on');
+  if(BULK_IDX >= BULK_QUEUE.length){
+    $('sheet').innerHTML = `
+      <button class="xbtn" onclick="$('modal').classList.remove('on')">✕</button>
+      <h3>✅ Listo</h3>
+      <div class="sub">Terminaste de recorrer los ${BULK_QUEUE.length} leads de esta vista.</div>`;
+    return;
+  }
+  const l = BULK_QUEUE[BULK_IDX];
+  BULK_TEMPLATE = BULK_TEMPLATE || WA_TEMPLATES[0].key;
+  const msg = buildMsg(l, BULK_TEMPLATE);
+  $('sheet').innerHTML = `
+    <button class="xbtn" onclick="$('modal').classList.remove('on')">✕</button>
+    <h3>📤 Envío WhatsApp — ${BULK_IDX+1} de ${BULK_QUEUE.length}</h3>
+    <div class="sub">${esc(l.name)} · ${esc(l.contact_name||'')} · ${esc(l.phone||'')} ${l.project ? '· '+esc(l.project) : ''}</div>
+    <div class="chips" style="margin-top:10px">
+      ${WA_TEMPLATES.map(t => `<div class="chip${BULK_TEMPLATE===t.key?' on':''}" onclick="BULK_TEMPLATE='${t.key}';showBulkModal()">${esc(t.label)}</div>`).join('')}
+    </div>
+    <textarea id="bulkMsg" style="min-height:90px">${esc(msg)}</textarea>
+    <a class="btn wa" style="display:block;text-align:center;text-decoration:none;margin-top:12px;padding:13px"
+       href="#" onclick="openBulkWa(${BULK_IDX});return false;">💬 Abrir WhatsApp y enviar</a>
+    <div class="row" style="margin-top:10px">
+      <button class="btn sec" onclick="BULK_IDX++;showBulkModal()">Saltar ➡</button>
+    </div>`;
+}
+
+function openBulkWa(idx){
+  const l = BULK_QUEUE[idx];
+  const msg = $('bulkMsg') ? $('bulkMsg').value : buildMsg(l, BULK_TEMPLATE);
+  window.open(waLink(l.phone, msg), '_blank');
+  BULK_IDX++;
+  showBulkModal();
+}
+
 // ---- FICHA LEAD ----
 async function openLead(id){
   $('modal').classList.add('on');
@@ -609,7 +847,7 @@ async function openLead(id){
       <div class="sub">${lead ? esc(lead.contact_name||'') : ''} ${phone ? '· '+esc(phone) : ''} ${lead && lead.email_from ? '· '+esc(lead.email_from) : ''}</div>
       ${desc ? '<div class="note-prev">'+esc(desc)+'</div>' : ''}
       <div class="row">
-        ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞 Llamar</a><a class="btn wa" href="'+waLink(phone)+'" target="_blank">💬 WhatsApp</a>' : ''}
+        ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞 Llamar</a><button class="btn wa" onclick="openWaPicker('+id+')">💬 WhatsApp</button>' : ''}
         ${lead && lead.email_from ? '<a class="btn sec" href="mailto:'+esc(lead.email_from)+'">✉️ Email</a>' : ''}
       </div>
 
@@ -619,7 +857,11 @@ async function openLead(id){
 
       <div style="margin-top:16px;font-weight:600;font-size:13px">Agregar nota</div>
       <textarea id="newNote" placeholder="Ej: Llamé, quedamos en volver a hablar el viernes a las 19:00…"></textarea>
-      <button class="savebtn" onclick="addNote(${id})">Guardar nota</button>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <input type="datetime-local" id="reminderDate" style="flex:1;padding:9px;border:1.5px solid var(--borde);border-radius:9px;font-size:13px">
+        <span style="font-size:12px;color:var(--gris);white-space:nowrap">📅 Recordar</span>
+      </div>
+      <button class="savebtn" onclick="addNote(${id})">Guardar</button>
 
       <div class="notehist">
         <div style="font-weight:600;font-size:13px;margin-bottom:8px">📝 Historial de notas</div>
@@ -642,10 +884,17 @@ async function moveStage(id){
 
 async function addNote(id){
   const note = $('newNote').value.trim();
-  if(!note){ toast('Escribe la nota primero'); return; }
+  const reminderRaw = $('reminderDate').value;
+  if(!note && !reminderRaw){ toast('Escribe la nota o pon una fecha'); return; }
   try{
-    await api('/api/lead/'+id+'/note', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note})});
-    toast('✅ Nota guardada');
+    if(note){
+      await api('/api/lead/'+id+'/note', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note})});
+    }
+    if(reminderRaw){
+      await api('/api/lead/'+id+'/reminder', {method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({date_deadline: reminderRaw.replace('T',' ')+':00', summary: note || 'Seguimiento'})});
+    }
+    toast('✅ Guardado' + (reminderRaw ? ' + recordatorio' : ''));
     openLead(id);
   }catch(e){ toast('❌ '+e.message); }
 }
@@ -665,6 +914,8 @@ def api_lead_read(id: int):
                     {"fields": ["id", "name", "contact_name", "partner_name", "phone",
                                 "email_from", "stage_id", "description",
                                 "expected_revenue", "create_date"]})
+        if recs:
+            recs[0]["project"] = extract_project(recs[0].get("description"))
         return {"ok": True, "lead": recs[0] if recs else None}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
