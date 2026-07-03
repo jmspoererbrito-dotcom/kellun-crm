@@ -625,8 +625,8 @@ async function renderLeads(){
   const chips = '<div class="chips"><div class="chip'+(CUR_STAGE===0?' on':'')+'" onclick="setStage(0)">Todos</div>' +
     STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+esc(s.name)+'</div>').join('') + '</div>';
   const projectChips = PROJECTS.length ? ('<div class="chips">' +
-    '<div class="chip'+(CUR_PROJECT===''?' on':'')+'" onclick="setProject(\'\')">🏗 Todos los proyectos</div>' +
-    PROJECTS.map(p => '<div class="chip'+(CUR_PROJECT===p.name?' on':'')+'" onclick="setProject(\''+p.name.replace(/'/g,"\\'")+'\')">'+esc(p.name)+' ('+p.count+')</div>').join('') +
+    '<div class="chip'+(CUR_PROJECT===''?' on':'')+'" onclick="setProject(\\'\\')">🏗 Todos los proyectos</div>' +
+    PROJECTS.map(p => '<div class="chip'+(CUR_PROJECT===p.name?' on':'')+'" onclick="setProject(\\''+p.name.replace(/'/g,"\\\\'")+'\\')">'+esc(p.name)+' ('+p.count+')</div>').join('') +
     '</div>') : '';
   const filters = `<div class="chips">
     <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderLeads()">👤 Mis leads</div>
@@ -639,7 +639,7 @@ async function renderLeads(){
   $('wrap').innerHTML = `
     <div class="search">
       <input id="qLeads" value="${esc(SEARCH_Q)}" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')submitSearch()">
-      ${SEARCH_Q ? '<button class="btn sec" onclick="SEARCH_Q=\'\';LEADS_LIMIT=300;renderLeads()" style="flex:0">✕</button>' : ''}
+      ${SEARCH_Q ? '<button class="btn sec" onclick="SEARCH_Q=\\'\\';LEADS_LIMIT=300;renderLeads()" style="flex:0">✕</button>' : ''}
       <button onclick="submitSearch()">Buscar</button>
     </div>` + chips + projectChips + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
   loadLeads();
@@ -711,7 +711,7 @@ function renderNotas(){
   $('wrap').innerHTML = `
     <div class="search">
       <input id="qNotas" value="${esc(NOTAS_Q)}" placeholder='Ej: "llamar", "19:00", "propuesta"…' onkeypress="if(event.key==='Enter')searchNotas()">
-      ${NOTAS_Q ? '<button class="btn sec" onclick="NOTAS_Q=\'\';renderNotas()" style="flex:0">✕</button>' : ''}
+      ${NOTAS_Q ? '<button class="btn sec" onclick="NOTAS_Q=\\'\\';renderNotas()" style="flex:0">✕</button>' : ''}
       <button onclick="searchNotas()">Buscar</button>
     </div>` + filters + `<div id="list"><div class="empty">Busca cualquier palabra dentro de tus notas.<br>Ej: <b>llamar</b>, <b>documentos</b>, un nombre o un proyecto.</div></div>`;
   if(NOTAS_Q) fetchNotas();
