@@ -6,6 +6,7 @@ Deploy en Railway. Credenciales via variables de entorno:
 """
 import os
 import re
+import socket
 import xmlrpc.client
 from datetime import datetime, timedelta
 from html import escape
@@ -14,6 +15,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI()
+
+# Sin esto, si Odoo no responde, la conexión queda colgada para siempre
+# (nunca hay error, nunca hay respuesta) y la app se queda pegada en
+# "conectando". Con esto, después de 20 segundos sin respuesta se corta
+# y se muestra un error claro en vez de quedar pegado.
+socket.setdefaulttimeout(20)
 
 ODOO_URL = os.environ.get("ODOO_URL", "").rstrip("/")
 ODOO_DB = os.environ.get("ODOO_DB", "")
@@ -92,7 +99,7 @@ PROJECT_NAMES = {
     "PDM": "Pie de Monte",
     "ADC": "Altos de Collao",
     "PEUMAYEN": "Peumayen",
-    # "CISS": "Nombre real del proyecto",
+    "CISS": "CISS",
 }
 
 PROJECT_TOKEN_RE = re.compile(
@@ -510,7 +517,17 @@ function toast(msg){
 }
 
 async function api(path, opts){
-  const r = await fetch(path, opts);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+  let r;
+  try{
+    r = await fetch(path, Object.assign({}, opts, { signal: controller.signal }));
+  }catch(e){
+    if(e.name === 'AbortError') throw new Error('Tiempo de espera agotado — Odoo no respondió a tiempo. Intenta de nuevo.');
+    throw e;
+  }finally{
+    clearTimeout(timeoutId);
+  }
   const j = await r.json();
   if(!j.ok) throw new Error(j.error || 'Error');
   return j;
