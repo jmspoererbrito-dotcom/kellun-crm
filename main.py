@@ -438,6 +438,17 @@ body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bla
 .search input:focus{outline:none;border-color:var(--verde2)}
 .search button{padding:11px 16px;background:var(--verde);color:white;border:none;border-radius:10px;font-size:14px;font-weight:600}
 .chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:10px;-webkit-overflow-scrolling:touch}
+.picker{background:white;border:1px solid var(--borde);border-radius:12px;margin-bottom:10px;overflow:hidden}
+.picker-head{padding:12px 14px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;font-size:13px;font-weight:600;color:var(--verde);user-select:none}
+.picker-head:active{background:var(--crema)}
+.picker-head .arr{font-size:10px;opacity:.6;transition:transform .2s}
+.picker.open .picker-head .arr{transform:rotate(180deg)}
+.picker-body{display:none;border-top:1px solid var(--borde);max-height:60vh;overflow-y:auto}
+.picker.open .picker-body{display:block}
+.picker-item{padding:11px 14px;font-size:13.5px;color:var(--soil);border-bottom:1px solid var(--borde);cursor:pointer;display:flex;justify-content:space-between;align-items:center}
+.picker-item:last-child{border-bottom:none}
+.picker-item:active,.picker-item.on{background:var(--crema);color:var(--verde);font-weight:600}
+.picker-item .n{font-size:11px;color:var(--gris);font-weight:400}
 .chip{padding:7px 13px;background:white;border:1.5px solid var(--borde);border-radius:99px;font-size:12px;font-weight:600;color:var(--verde);white-space:nowrap;cursor:pointer}
 .chip.on{background:var(--verde);color:white;border-color:var(--verde)}
 .chip .n{opacity:.65;font-weight:400}
@@ -638,13 +649,36 @@ async function renderHoy(){
 }
 
 // ---- LEADS ----
+let OPEN_STAGE_PICKER = false;
+let OPEN_PROJECT_PICKER = false;
+
 async function renderLeads(){
-  const chips = '<div class="chips"><div class="chip'+(CUR_STAGE===0?' on':'')+'" onclick="setStage(0)">Todos</div>' +
-    STAGES.map(s => '<div class="chip'+(CUR_STAGE===s.id?' on':'')+'" onclick="setStage('+s.id+')">'+stageLabel(s.name)+'</div>').join('') + '</div>';
-  const projectChips = PROJECTS.length ? ('<div class="chips">' +
-    '<div class="chip'+(CUR_PROJECT===''?' on':'')+'" onclick="setProject(\\'\\')">🏗 Proyectos</div>' +
-    PROJECTS.map(p => '<div class="chip'+(CUR_PROJECT===p.name?' on':'')+'" onclick="setProject(\\''+p.name.replace(/'/g,"\\\\'")+'\\')">'+esc(p.name)+' ('+p.count+')</div>').join('') +
-    '</div>') : '';
+  const curStageName = CUR_STAGE ? (STAGES.find(s => s.id === CUR_STAGE)?.name || 'Etapa') : 'Todas las etapas';
+  const stagePicker = `
+    <div class="picker${OPEN_STAGE_PICKER?' open':''}">
+      <div class="picker-head" onclick="OPEN_STAGE_PICKER=!OPEN_STAGE_PICKER;renderLeads()">
+        <span>🏷️ ${CUR_STAGE ? stageLabel(curStageName) : 'Todas las etapas'}</span>
+        <span class="arr">▼</span>
+      </div>
+      <div class="picker-body">
+        <div class="picker-item${CUR_STAGE===0?' on':''}" onclick="setStage(0);OPEN_STAGE_PICKER=false;renderLeads()">Todas las etapas</div>
+        ${STAGES.map(s => `<div class="picker-item${CUR_STAGE===s.id?' on':''}" onclick="setStage(${s.id});OPEN_STAGE_PICKER=false;renderLeads()">${stageLabel(s.name)}</div>`).join('')}
+      </div>
+    </div>`;
+
+  const curProjectName = CUR_PROJECT || 'Todos los proyectos';
+  const projectPicker = PROJECTS.length ? `
+    <div class="picker${OPEN_PROJECT_PICKER?' open':''}">
+      <div class="picker-head" onclick="OPEN_PROJECT_PICKER=!OPEN_PROJECT_PICKER;renderLeads()">
+        <span>🏗 ${esc(curProjectName)}</span>
+        <span class="arr">▼</span>
+      </div>
+      <div class="picker-body">
+        <div class="picker-item${CUR_PROJECT===''?' on':''}" onclick="setProject('');OPEN_PROJECT_PICKER=false;renderLeads()">Todos los proyectos</div>
+        ${PROJECTS.map(p => `<div class="picker-item${CUR_PROJECT===p.name?' on':''}" onclick="setProject('${p.name.replace(/'/g,"\\\\'")}');OPEN_PROJECT_PICKER=false;renderLeads()"><span>${esc(p.name)}</span><span class="n">${p.count}</span></div>`).join('')}
+      </div>
+    </div>` : '';
+
   const filters = `<div class="chips">
     <div class="chip${MINE_ONLY?' on':''}" onclick="MINE_ONLY=1;renderLeads()">👤 Mías</div>
     <div class="chip${MINE_ONLY?'':' on'}" onclick="MINE_ONLY=0;renderLeads()">🏢 Todas</div>
@@ -658,7 +692,7 @@ async function renderLeads(){
       <input id="qLeads" value="${esc(SEARCH_Q)}" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')submitSearch()">
       ${SEARCH_Q ? '<button class="btn sec" onclick="SEARCH_Q=\\'\\';LEADS_LIMIT=300;renderLeads()" style="flex:0">✕</button>' : ''}
       <button onclick="submitSearch()">Buscar</button>
-    </div>` + chips + projectChips + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
+    </div>` + stagePicker + projectPicker + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
   loadLeads();
   if(PROJECTS_LOADED_FOR !== MINE_ONLY) loadProjects();
 }
