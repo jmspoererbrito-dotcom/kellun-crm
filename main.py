@@ -518,6 +518,8 @@ let CUR_PROJECT = '';
 let BULK_QUEUE = [];
 let BULK_IDX = 0;
 let BULK_TEMPLATE = null;
+let SELECT_MODE = false;
+let SELECTED = new Set();
 
 const $ = id => document.getElementById(id);
 const esc = s => (s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -685,16 +687,132 @@ async function renderLeads(){
     <div class="chip${ORDER==='recent'?' on':''}" onclick="ORDER='recent';renderLeads()">🕐 Recientes</div>
     <div class="chip${ORDER==='oldest'?' on':''}" onclick="ORDER='oldest';renderLeads()">📅 Antiguos</div>
     <div class="chip" onclick="clearFilters()">🗑 Limpiar</div>
-    <div class="chip" style="background:#25D366;color:white;border-color:#25D366" onclick="startBulkWhatsApp()">📤 Masivo</div>
+    <div class="chip${SELECT_MODE?' on':''}" onclick="toggleSelectMode()">${SELECT_MODE?'✅ Selección ON':'☑️ Seleccionar'}</div>
   </div>`;
+
+  const actionBar = SELECT_MODE ? `<div class="picker" style="background:var(--verde);color:white;border-color:var(--verde)">
+    <div class="picker-head" style="color:white;cursor:default">
+      <span>${SELECTED.size} seleccionados</span>
+      <div>
+        <button class="btn sec" style="padding:6px 12px;margin-right:6px" onclick="selectAllVisible()">Todos</button>
+        <button class="btn sec" style="padding:6px 12px" onclick="clearSelection()">Ninguno</button>
+      </div>
+    </div>
+    ${SELECTED.size > 0 ? `<div style="padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;background:var(--verde-claro)">
+      <button class="btn sec" style="flex:1;min-width:120px" onclick="bulkSelectedWhatsApp()">💬 WhatsApp masivo</button>
+      <button class="btn sec" style="flex:1;min-width:120px" onclick="bulkSelectedEmail()">✉️ Correo masivo</button>
+    </div>` : ''}
+  </div>` : '';
   $('wrap').innerHTML = `
     <div class="search">
       <input id="qLeads" value="${esc(SEARCH_Q)}" placeholder="Buscar por nombre…" onkeypress="if(event.key==='Enter')submitSearch()">
       ${SEARCH_Q ? '<button class="btn sec" onclick="SEARCH_Q=\\'\\';LEADS_LIMIT=300;renderLeads()" style="flex:0">✕</button>' : ''}
       <button onclick="submitSearch()">Buscar</button>
-    </div>` + stagePicker + projectPicker + filters + '<div id="list"><div class="spin">Cargando…</div></div>';
+    </div>` + stagePicker + projectPicker + filters + actionBar + '<div id="list"><div class="spin">Cargando…</div></div>';
   loadLeads();
   if(PROJECTS_LOADED_FOR !== MINE_ONLY) loadProjects();
+}
+
+function toggleSelectMode(){
+  SELECT_MODE = !SELECT_MODE;
+  if(!SELECT_MODE) SELECTED.clear();
+  renderLeads();
+}
+function toggleSelect(id){
+  if(SELECTED.has(id)) SELECTED.delete(id); else SELECTED.add(id);
+  renderLeads();
+}
+function selectAllVisible(){
+  LAST_LEADS.forEach(l => SELECTED.add(l.id));
+  renderLeads();
+}
+function clearSelection(){ SELECTED.clear(); renderLeads(); }
+
+function getSelectedLeads(){
+  return LAST_LEADS.filter(l => SELECTED.has(l.id));
+}
+
+function bulkSelectedWhatsApp(){
+  const source = getSelectedLeads().filter(l => l.phone);
+  if(!source.length){ toast('Sin teléfonos en la selección'); return; }
+  BULK_QUEUE = source;
+  BULK_IDX = 0;
+  showBulkModal();
+}
+
+function bulkSelectedEmail(){
+  const source = getSelectedLeads().filter(l => l.email_from);
+  if(!source.length){ toast('Sin correos en la selección'); return; }
+  openEmailBulkModal(source);
+}
+
+const EMAIL_TEMPLATES = [
+  { key: 'primer', label: 'Primer contacto',
+    subject: p => `Consulta proyecto ${p}`,
+    body: (nombre, proyecto) => `Hola ${nombre},\\n\\nSoy Juan Manuel de Kellun Gestión Inmobiliaria. Te contacto por tu consulta del proyecto ${proyecto}.\\n\\nMe gustaría coordinar una conversación para presentarte más detalles y responder tus preguntas. ¿Qué horario te acomoda?\\n\\nQuedo atento,\\nJuan Manuel Spoerer\\nKellun Gestión Inmobiliaria` },
+  { key: 'nocontesta', label: 'No contesté llamada',
+    subject: p => `Seguimiento — proyecto ${p}`,
+    body: (nombre, proyecto) => `Hola ${nombre},\\n\\nSoy Juan Manuel de Kellun Gestión Inmobiliaria. He intentado comunicarme contigo por teléfono respecto al proyecto ${proyecto}, sin éxito.\\n\\nSi te acomoda más el correo o WhatsApp, quedo a tu disposición. También puedes indicarme un horario para llamarte.\\n\\nSaludos,\\nJuan Manuel Spoerer\\nKellun Gestión Inmobiliaria` },
+  { key: 'sigueinteres', label: 'Sigue interesado',
+    subject: p => `¿Sigues interesado en ${p}?`,
+    body: (nombre, proyecto) => `Hola ${nombre},\\n\\nSoy Juan Manuel de Kellun. Quería saber si sigues interesado en el proyecto ${proyecto}, para coordinar los próximos pasos.\\n\\nQuedo atento a tus comentarios.\\n\\nSaludos,\\nJuan Manuel Spoerer\\nKellun Gestión Inmobiliaria` },
+];
+
+let EMAIL_QUEUE = [];
+let EMAIL_IDX = 0;
+let EMAIL_TEMPLATE = 'primer';
+
+function openEmailBulkModal(leads){
+  EMAIL_QUEUE = leads;
+  EMAIL_IDX = 0;
+  EMAIL_TEMPLATE = EMAIL_TEMPLATES[0].key;
+  showEmailBulkModal();
+}
+
+function emailBuild(l, key){
+  const nombre = (l.contact_name || '').trim().split(' ')[0] || '';
+  const proyecto = l.project || 'consultado';
+  const t = EMAIL_TEMPLATES.find(t => t.key === key) || EMAIL_TEMPLATES[0];
+  return { subject: t.subject(proyecto), body: t.body(nombre, proyecto) };
+}
+
+function showEmailBulkModal(){
+  $('modal').classList.add('on');
+  if(EMAIL_IDX >= EMAIL_QUEUE.length){
+    $('sheet').innerHTML = `
+      <button class="xbtn" onclick="$('modal').classList.remove('on')">✕</button>
+      <h3>✅ Listo</h3>
+      <div class="sub">Terminaste de recorrer los ${EMAIL_QUEUE.length} correos.</div>`;
+    return;
+  }
+  const l = EMAIL_QUEUE[EMAIL_IDX];
+  const { subject, body } = emailBuild(l, EMAIL_TEMPLATE);
+  $('sheet').innerHTML = `
+    <button class="xbtn" onclick="$('modal').classList.remove('on')">✕</button>
+    <h3>✉️ Correo — ${EMAIL_IDX+1} de ${EMAIL_QUEUE.length}</h3>
+    <div class="sub">${esc(l.name)} · ${esc(l.contact_name||'')} · ${esc(l.email_from||'')} ${l.project ? '· '+esc(l.project) : ''}</div>
+    <div class="chips" style="margin-top:10px">
+      ${EMAIL_TEMPLATES.map(t => `<div class="chip${EMAIL_TEMPLATE===t.key?' on':''}" onclick="EMAIL_TEMPLATE='${t.key}';showEmailBulkModal()">${esc(t.label)}</div>`).join('')}
+    </div>
+    <div style="font-size:11px;color:var(--gris);margin-top:12px;margin-bottom:4px">ASUNTO</div>
+    <input type="text" id="emailSubject" value="${esc(subject)}" style="width:100%;padding:9px;border:1.5px solid var(--borde);border-radius:9px;font-size:13px">
+    <div style="font-size:11px;color:var(--gris);margin-top:10px;margin-bottom:4px">CUERPO</div>
+    <textarea id="emailBody" style="min-height:180px">${esc(body)}</textarea>
+    <a class="btn wa" style="display:block;text-align:center;text-decoration:none;margin-top:12px;padding:13px"
+       href="#" onclick="sendEmail(${EMAIL_IDX});return false;">✉️ Abrir correo y enviar</a>
+    <div class="row" style="margin-top:10px">
+      <button class="btn sec" onclick="EMAIL_IDX++;showEmailBulkModal()">Saltar ➡</button>
+    </div>`;
+}
+
+function sendEmail(idx){
+  const l = EMAIL_QUEUE[idx];
+  const subject = $('emailSubject') ? $('emailSubject').value : '';
+  const body = $('emailBody') ? $('emailBody').value : '';
+  const url = 'mailto:'+encodeURIComponent(l.email_from)+'?subject='+encodeURIComponent(subject)+'&body='+encodeURIComponent(body);
+  window.open(url, '_blank');
+  EMAIL_IDX++;
+  showEmailBulkModal();
 }
 
 let PROJECTS_LOADED_FOR = null;
@@ -732,16 +850,22 @@ async function loadLeads(){
       const desc = (l.description||'').replace(/<[^>]+>/g,'').trim();
       const fecha = l.lead_date || (l.create_date||'').split(' ')[0];
       const asignado = l.user_id ? l.user_id[1] : 'Sin asignar';
-      return `<div class="card">
+      const selected = SELECTED.has(l.id);
+      const checkbox = SELECT_MODE
+        ? `<div style="position:absolute;top:12px;right:12px;font-size:22px" onclick="toggleSelect(${l.id});event.stopPropagation();">${selected ? '☑️' : '⬜'}</div>`
+        : '';
+      const cardClick = SELECT_MODE ? `onclick="toggleSelect(${l.id})"` : '';
+      return `<div class="card" style="position:relative${selected ? ';background:#F0F7F3;border-color:var(--verde-claro)' : ''}" ${cardClick}>
+        ${checkbox}
         <span class="badge">${l.stage_id ? stageLabel(l.stage_id[1]) : '—'}</span>
         <div class="nm">${esc(l.name)}</div>
         <div class="ct">${esc(l.contact_name||l.partner_name||'')} ${phone ? '· '+esc(phone) : ''}</div>
         ${desc ? '<div class="note-prev">'+esc(desc.slice(0,200))+'</div>' : ''}
-        <div class="meta">🗓 Ingresó: ${esc(fecha)} · 👤 ${esc(asignado)}</div>
-        <div class="row">
+        <div class="meta">🗓 Ingresó: ${esc(fecha)} · 👤 ${esc(asignado)}${l.email_from ? ' · ✉️ '+esc(l.email_from) : ''}</div>
+        ${SELECT_MODE ? '' : `<div class="row">
           ${phone ? '<a class="btn call" href="'+telLink(phone)+'">📞</a><button class="btn wa" onclick="openWaPicker('+l.id+')">💬</button>' : ''}
           <button class="btn sec" onclick="openLead(${l.id})">Ficha / Mover</button>
-        </div>
+        </div>`}
       </div>`;
     }).join('');
     const counter = `<div class="meta" style="text-align:center;margin:8px 0">Mostrando ${j.shown} de ${j.total}</div>`;
@@ -945,8 +1069,7 @@ async function moveStage(id){
   try{
     await api('/api/lead/'+id+'/stage', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({stage_id:sid})});
     toast('✅ Etapa actualizada');
-    $('modal').classList.remove('on');
-    render();
+    openLead(id);
   }catch(e){ toast('❌ '+e.message); }
 }
 
